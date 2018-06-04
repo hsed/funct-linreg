@@ -5,246 +5,124 @@ open System
 open PLplot
 open MathNet.Numerics.Distributions
 open MathNet.Numerics.Random
-open MathNet.Numerics.LinearAlgebra
-open MathNet.Numerics.LinearAlgebra.Double
-
-type ErrType = string
 
 type Weight = {w1: float; w2: float; b: float}
 
+let epochs = 50
+let yRealFn x = 0.4*(x**2.0) + 0.3*x + 0.9 + Normal.Sample(0.0, 1.0)
+
+//hypothesis
+let hypFn (x: float) (w:Weight) =
+            w.w1*(x**2.0) + w.w2*x + w.b
+
+let costFnWithPow (pow) (h : float) (y: float) =
+            (h - y)**pow
+
+// the actual costFn
+let costFn = costFnWithPow(2.0)
+
+//partial differntiation
+//dJ/dw1, dJ/dw2, dJ/db
+let getCostDerivatives x h y : (float * float * float) = 
+                        let costTerm = (costFnWithPow 1.0 h y)
+                        let m = 2.0 //multiplier
+                        (
+                            m*(x**2.0)*costTerm,
+                            m*(x)*costTerm,
+                            m*costTerm
+                        )
 
 
-type ActFn = | ID    //identity f(x) = x
-             | TANH // f(x) = tanh(x)
-              //| RELU
+let transformList (yFunc) (X) : (float list * float list)=
+    X
+    |> (fun X -> (X, (List.map yFunc X)))
 
-type Layer = {wMatx: Matrix<float>; actFn: ActFn;}
+let wMain = {
+    w1 = Normal.Sample(0.0, 1.0);
+    w2 = Normal.Sample(0.0, 1.0);
+    b = Normal.Sample(0.0, 1.0);
+}
 
-type Network = Layer list
+//define data
+let XActual = [ 1.0 .. 1.0 .. 10.0 ]
+let XTrain = [ 1.0 .. 1.0 .. 10.0 ]
+//this is a map now
+// it will always be >= the hypothesis ranges
+let yLookupMap : Map<float,float> = 
+    XActual
+    |> List.map (fun x -> (x, yRealFn(x)))
+    |> Map.ofList
+let getYList map = 
+    map
+    |> Map.toList
+    |> List.map snd
+    |> List.distinct
 
-type NodesVect = {sVect: Vector<float>; xVect: Vector<float>} //each nodesVect will be S => without actFn and X => with actFn
+//H = a vector with each elem f(w1,w2,b) i.e. x is now evaluated    
+let H =
+    XTrain
+    |> List.map (fun x -> hypFn(x))
 
-type NodesVectList = NodesVect list
+let lr = 0.0001
 
-//make a tuple of nodes,actFn,
-//list.map this and u get weight matrix+actFn tuple list.
-//make this list only for hidden layers
-//for input and output layer have inputFeatureCount, outputFeatureCount??
-//so [ 14, [] , (1, identityFn)]
-//or easier method:
-// [(14,_) ; (32, relu) ; (8, relu) ; (1, ident)]
+let rec optimise (xList : float list) (hList: (Weight -> float) list) (yMap : Map<float,float>) (w : Weight) (i : int) =
 
-//or ([14 ; 32 ; 8 ; 1], [relu, relu, identity]) so list2 must be 1 less or else return result.error
-
-//return is [ (wmtx1, actFnLayer1) ... (wmatxL, actFnLayerL) ]
-
-(*
-    see auto diff lib f# for ideas 
-    fwd prop:
-    assume single input for now from sample => x_0
-    input x_0=0.5 then reduce weight matrix list by actFn((w.T * x + b)) => x_1
-    do reduce to get final output
-    compare this with fixed weight example test
-
-    back_prop
-    do delta_x:
-
-    again either do back reduce or map or simply recursion
-    do cleaver way to update weights maybe use map or something
-
-    create main list and reduce it by applying fwd+back to every item and returning new weight set.
-    in end u have pass through all but u must randomise again
-*)
-
-let epochs = 1//50
-let lr = 0.04//0.0001
-
-let yRealFn x = 0.4*(x**2.0)+0.2+0.3*x*sin(8.*x)
-let yRealFnAndNoise x = (yRealFn x) + 0.2*Normal.Sample(0.0, 1.0)
-
-let getActFn (fn: ActFn) : (float->float) =
-    match fn with
-    | ID -> id
-    | TANH -> tanh
-
-let getActFnDeriv (fn: ActFn) : (float->float) =
-    match fn with
-    | ID -> (fun _ -> 1.0)
-    | TANH -> (fun x  -> 1.0 - (tanh(x)**2.0))
-
-//Only works with MSE as metrics!
-let lastLayerDeriv (x_L : Vector<float>) (s_L : Vector<float>) (y : Vector<float>) (theta_L' : ActFn) =
-    (2.0*(x_L - y)).PointwiseMultiply(s_L.Map (Func<float, float> (getActFnDeriv (theta_L'))))
+    //a list of error derivatives for each of the weights i.e. dJ/dw_n, one per data sample
+    let getDerivTuple : ((float * float * float) list) =
+        (List.map2 (fun x h -> (getCostDerivatives x (h w) (yMap.[x])) ) xList hList)
     
+    //get a list of error values i.e. J, one per data sample 
+    let getCosts : (float list) =
+        (List.map2 (fun x h -> (costFn (h w) (yMap.[x])) ) xList hList)
 
+    //printfn "FinalDerivTupleList: %A" getDerivTuple
+    //printfn "FinalCostList: %A" getCosts
 
+    //average a list of dJ/dw_n tuples into one tuple.
+    let avgWError (tripleTuple : (float *float *float) list) : (float * float * float) =
+        let m = float(tripleTuple.Length)
+        ((List.sumBy (fun (w1, _, _) -> w1) tripleTuple) / m,
+         (List.sumBy (fun (_, w2, _) -> w2) tripleTuple) / m,
+         (List.sumBy (fun (_, _, b) -> b) tripleTuple) / m    )
 
-//provide start, step, end and yFn
-//return a tuple list with each element as (x_i, y_i)
-let genDataSet (startVal) (endVal) (stepVal) (fN: 'a -> 'b) = 
-    [ startVal .. stepVal .. endVal]
-    |> List.map(fun x -> (x, yRealFnAndNoise x))
-    
+    //average the error values
+    let MSE = List.average getCosts
 
+    (printfn "Epoch: %d\t\tMSE: %f\t\tWeights: w1=%f w2=%f b=%f" i MSE w.w1 w.w2 w.b)
 
-let initNetwork (nodeLst : int list) (actFnLst : ActFn list) : Result<Network, ErrType> =
-    //or ([14 ; 32 ; 8 ; 1], [relu, relu, identity]) so list2 must be 1 less or else return result.error
-    //return is [ (wmtx1, actFnLayer1) ... (wmatxL, actFnLayerL) ]
-    let genRandMatx (rows) (cols) : Matrix<float> = 
-        CreateMatrix.Random(rows,cols)
+    //return an updated Weight record given the learning rate and derivatives (values) of each of the weights
+    let updateW wOrig dW1 dW2 dB lr =
+        {
+            w1 = wOrig.w1 - lr*dW1
+            w2 = wOrig.w2 - lr*dW2
+            b  = wOrig.b  - lr*dB 
+        }
 
-    match (nodeLst.Length - actFnLst.Length) with
-    | 1 -> 
-        match nodeLst.Length with
-        | x when x > 1 ->
-            List.init (actFnLst.Length) (fun i ->
-                {
-                    wMatx = genRandMatx (nodeLst.[i] + 1) (nodeLst.[i+1]);
-                    actFn = actFnLst.[i];
-                }
-            )
-            |> Ok
-        | _ -> Error("The specification was incorrect, need at-least two items in nodeLst.")
-        //For each w_ij in WMatx, 0 < i < d^{l-1} ; 1 < j < d^{l}
-        //biases for each node in layer l will be added as extra node in layer l-1 hence i>=0
-        //i rows ; j cols
-        
-    | _ -> Error("The specification was incorrect, nodeLst must be exactly one item greater than actFnLst.")
-
-
-let fwdProp (x: Vector<float>) (net : Network) : (NodesVectList * (Network)) =
-    // take in a vector of type floa this is our input can be mx1 for any m dim of input
-    // also takes in a network that will get reduced
-    // finally returns a vector which will be our hypothesis h(x) can be of any dim matching y dim
-    //actFn((w.T * x + b))
-
-    let propNetwork (nvectLstAndLayers: NodesVectList * (Network)) (layer : Layer) : (NodesVectList * (Network)) =
-        
-        let nvectLst, layerLst = nvectLstAndLayers
-         //result of matmul will be nx1 matx where n=l^(d) so excluding the "1" node or x_0^l(d)
-        let newSVect =  layer.wMatx.Transpose() * CreateVector.Dense((Array.concat [ [|1.0|] ; nvectLst.Head.xVect.ToArray() ]))  //bias is auto included by weight[0, :]
-        let newXVect = (newSVect.Map (Func<float, float> (getActFn layer.actFn)))   //Func type-casting needed by vector
-        ({xVect=newXVect ; sVect=newSVect} :: nvectLst , layer :: layerLst)
-
-        //for list.mapfold u give X^(0) as state_0 and Weight_(1) then result X_(1) is new state and also used for mapping so you return it twice
-        //next time u give X^(1) as state_1 and Weight_(2) to get X_(2)
-        //in end u have list of X's and final state == X_(L)
-
-    (List.fold propNetwork ([{xVect=x ; sVect=x}], []) net)   //initially sVect == xVect i.e. no actFn for raw input
-
-let backProp (yVect : Vector<float>) (fwdPropEval : (NodesVectList * (Network))) : Network =
-
-    let rec _calcPrevDelta (deltaLst : Vector<float> list) (layerLst: Network) (nodesInLayerLst: NodesVect list) : Vector<float> list =
-        match layerLst with
-        | [_] -> deltaLst
-        | head :: head2 :: _ -> 
-                    printfn "****DEBUG PREVDELTA: %A\n ***DEBUG wMatx: %A, \nDEBUG: nodesVect: %A" deltaLst.Head head.wMatx nodesInLayerLst
-                    let interim = head.wMatx.RemoveRow(0) * deltaLst.Head
-
-                    let theta' = nodesInLayerLst.Head.sVect.Map (Func<float, float> (getActFnDeriv (head2.actFn)))
-                    printfn "***INTERIM --> \n\n%A\n\nTHETA' --> \n\n%A\n\n" interim theta'
-
-                    //hamadard product
-                    let prevDelta = interim.PointwiseMultiply(theta')
-                    _calcPrevDelta (prevDelta :: deltaLst) (layerLst.Tail) (nodesInLayerLst.Tail)
-        | [] -> [] //should throw error but this wil never hit if wMatx is checked initially
-    
-    let layerListUpdater (prevNodes : NodesVect) (currDelta : Vector<float>) (currLayer : Layer) : Layer =
-        //must add 1.0 on top for correct shape!
-        //torow-matx is same as (colVect).T
-        
-        let dEdWMatx =  CreateMatrix.DenseOfColumnArrays( (Array.concat [ [|1.0|] ; prevNodes.xVect.ToArray() ])  ) * currDelta.ToRowMatrix()
-
-        printfn "dEdWMATXXXXX: \n%A\n" dEdWMatx
-        // printfn "dEdWMATXXXXX Reduced: \n%A\n" (lr*dEdWMatx)
-
-        let newWMatx = currLayer.wMatx - (lr*dEdWMatx)
-
-        printfn "***updatedW: \n%A\n" newWMatx
-        {currLayer with wMatx=newWMatx}
-        
-
-    let xAndSLstRev = fwdPropEval |> fst
-    let netRev = fwdPropEval |> snd
-
-    //temporary for debug dont use noise
-
-    let deltaL = lastLayerDeriv xAndSLstRev.Head.xVect xAndSLstRev.Head.sVect yVect netRev.Head.actFn
-    printfn "***DEBUG_FINAL_LAYER_ERR_DERIV: %A" deltaL
-    // first step is to calculate last layer error
-    // this uses a combination of derivative of mean square error and derivative of last layer act Fn
-
-    //so u foldback and calc dleta and every time you get new delta u append to head so that is O(1)
-    //A list of all error deltas in reverse order
-    //first arg must be a list
-    //slice the xAndSList cause we need the prev elements for multiply
-    let deltaRevLst = _calcPrevDelta [deltaL] netRev xAndSLstRev.Tail |> List.rev//List.fold2 calcPrevDelta [deltaL] netRev subRevLst 
-
-    //now simply use list fold2 to calc Wmatx from deltaRevLst and xAndSRevLst.Tail
-    //also since they r rev if for every wMatx you append to front, then in the end your new wMAtxList will be automatically sorted!!
-    printfn "THE DELTAS: \n\n%A" deltaRevLst
-    List.map3 layerListUpdater xAndSLstRev.Tail deltaRevLst netRev |> List.rev
-        
-
-
+    //main entry-point
+    match i with
+    | index when (index < epochs) ->
+        match (avgWError getDerivTuple) with
+        | (w1E,w2E,bE) -> optimise xList hList yLookupMap (updateW w w1E w2E bE lr) (i+1)                  
+    |  _ -> (MSE, w) 
 
 let plotResults finalResult = 
     use pl = new PLStream()
-    PLplot.Native.sdev("wincairo")
     pl.init()
     pl.env( 0.0, 10.0, 0.0, 30.0, AxesScale.Independent, AxisBox.BoxTicksLabelsAxes )
     
-    //entry point
-    // match finalResult with
-    // | (finalMSE, finalW) ->
-    //     pl.lab( "x ->", "y ->", (sprintf "A plot of true values ('x') vs final prediction (line) [MSE: %0.4f]" finalMSE))
-    //     pl.poin( List.toArray(XTrain), List.toArray(getYList yLookupMap), 'x')
-    //     pl.line( List.toArray(XTrain), List.toArray(List.map (fun h -> (h finalW)) H))
+
+    match finalResult with
+    | (finalMSE, finalW) ->
+        pl.lab( "x ->", "y ->", (sprintf "A plot of true values ('x') vs final prediction (line) [MSE: %0.4f]" finalMSE))
+        pl.poin( List.toArray(XTrain), List.toArray(getYList yLookupMap), 'x')
+        pl.line( List.toArray(XTrain), List.toArray(List.map (fun h -> (h finalW)) H))
 
 [<EntryPoint>]
 let main argv = 
     //optimise weights, print final results and then plot the results
-
-    printfn "ID(-343434.0) == %A" ((getActFn ID) -343434.0)
-
-    // printfn "%A" "test"
-    // (initNetwork [ 1 ; 3 ; 1] [ID ; ID] ID')
-    // |> printfn "%A"
-
-    //***real code
-    match (initNetwork [ 1 ] [ ]) with
-    | Ok(x) -> printfn "OK: %A" x
-    | Error(x) -> printfn "ERROR: %A" x
-
-    let x = 0.2
-    let y = yRealFn x //temp for now we only do without noise for debugging
-
-    printfn "Y_VAL****: %A" y
-
-    let w_l1 = DenseMatrix.OfRowArrays([| [|0.1 ; 0.15|] ; [|0.05 ; 0.2|] |])
-    let w_l2 = DenseMatrix.OfRowArrays([| [|0.7|] ; [|-0.6|] ; [|0.4|] |])
-    let debugNNArch = [ {wMatx=w_l1 ; actFn=TANH} ; {wMatx=w_l2 ; actFn=ID} ]
-
-    printfn "***DEBUG_ARCH: %A\n" debugNNArch
-
-    debugNNArch
-    |> fwdProp (CreateVector.Dense([|x|]))
-    |> backProp (CreateVector.Dense([|y|]))
-    |> printfn "***DEBUG_BACK-PROP_RESULT: \n\n%A" //|> //printfn "***DEBUG_FWD-PROP_RESULT: \n\n%A"
-
-
-    //***Real code
-    // let fwdPropResult = 
-    //     nnArch
-    //     |> fwdProp (CreateVector.Dense([|1.0|]))
-    // match fwdPropResult with
-    // | Ok(x) -> fst x |> printfn "FWD-PROP RESULT: \n\n%A"
-    // | Error(x) -> x |> printfn "FWD-PROP ERROR: \n\n%A"
-     
-    //printfn "RESULT: \n\n%A" tt
-    // (optimise XTrain H yLookupMap wMain 1)  
-    // |> (fun x -> (printfn "\n\n(finalMSEAndWeights, finalWeights): %A" x) ; x)
-    // |> plotResults
+    (optimise XTrain H yLookupMap wMain 1)  
+    |> (fun x -> (printfn "\n\n(finalMSEAndWeights, finalWeights): %A" x) ; x)
+    |> plotResults
 
     (*
         top level:
